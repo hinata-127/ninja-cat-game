@@ -74,6 +74,12 @@ let hitFlash = 0;
 let lastTime = 0;
 let bigCrowTimes = []; // 大きなカラスが出る時刻（残り秒数）
 
+// 手ざわり（第5話）
+let shakeTime = 0;     // 成功の瞬間だけの小さなバウンド（残り秒数）
+const SHAKE_DUR = 0.15, SHAKE_PX = 0; // 揺れオフ（陽介の指の審査）
+let squash = 0;        // 押した瞬間の沈み込み 0〜1
+let lean = 0;          // 進行方向への傾き
+
 // ---- 効果音（コードだけで鳴らす） ----
 let audioCtx = null;
 function unlockAudio() {
@@ -96,9 +102,22 @@ function beep(freq, dur, type, vol, when, slideTo) {
   osc.start(t0);
   osc.stop(t0 + dur + 0.02);
 }
+// 同じ音の重ね鳴り防止（連打で耳が痛くならないように）
+const lastPlayed = {};
+function canPlay(name, gap) {
+  const now = performance.now();
+  if (lastPlayed[name] && now - lastPlayed[name] < gap) return false;
+  lastPlayed[name] = now;
+  return true;
+}
 function soundCollect() {  // 集めた: かわいい2音
+  if (!canPlay("collect", 60)) return;
   beep(880, 0.09, "triangle", 0.18);
   beep(1318, 0.12, "triangle", 0.15, 0.07);
+}
+function soundStep() {     // 押した瞬間の「コッ」
+  if (!canPlay("step", 70)) return;
+  beep(320, 0.05, "square", 0.06, 0, 240);
 }
 function soundHit() {      // カラス: 下がる音
   beep(220, 0.25, "sawtooth", 0.18, 0, 80);
@@ -124,6 +143,7 @@ let touchDir = 0;
 
 document.addEventListener("keydown", (e) => {
   unlockAudio();
+  if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !e.repeat && state === "play") soundStep();
   if (e.key === "ArrowLeft") keys.left = true;
   if (e.key === "ArrowRight") keys.right = true;
   if ((state === "title" || state === "over") && (e.key === " " || e.key === "Enter")) startGame();
@@ -144,6 +164,7 @@ canvas.addEventListener("touchstart", (e) => {
   unlockAudio();
   if (state !== "play") { startGame(); return; }
   touchDir = touchPos(e) < W / 2 ? -1 : 1;
+  soundStep();
 }, { passive: false });
 canvas.addEventListener("touchmove", (e) => {
   e.preventDefault();
@@ -232,6 +253,11 @@ function update(dt) {
   player.x += dir * player.speed * dt;
   player.x = Math.max(30, Math.min(W - 30, player.x));
 
+  // 手ざわり: 押している間は沈み、進行方向に傾く（0.1秒以内に応える）
+  const squashTarget = dir !== 0 ? 1 : 0;
+  squash += (squashTarget - squash) * Math.min(1, dt * 18);
+  lean += (dir * 0.14 - lean) * Math.min(1, dt * 14);
+
   // 出現（だんだん間隔が短くなる。上限あり）
   spawnTimer -= dt;
   if (spawnTimer <= 0) {
@@ -252,6 +278,7 @@ function update(dt) {
       if (it.type === "tiramisu") {
         score++;
         soundCollect();
+        shakeTime = SHAKE_DUR; // 成功の瞬間だけ、小さく揺れる
       } else if (it.type === "bigcrow") {
         // ボスガラスは一発アウト
         hitFlash = 0.8;
@@ -277,6 +304,7 @@ function update(dt) {
   }
 
   if (hitFlash > 0) hitFlash -= dt;
+  if (shakeTime > 0) shakeTime -= dt;
 }
 
 // ---- 描画 ----
@@ -325,6 +353,36 @@ function drawBackground() {
   ctx.fillRect(0, H - 40, W, 40);
 }
 
+function drawTiramisu(x, y, size) {
+  // 手描きティラミス: コーヒー生地とクリームの3層＋ココアパウダー
+  const w = size, h = size * 0.82;
+  ctx.save();
+  ctx.translate(x, y);
+  const l = -w / 2, t = -h / 2;
+  // コーヒー生地（下段・中段）
+  ctx.fillStyle = "#7a5230";
+  ctx.fillRect(l, t + h * 0.62, w, h * 0.38);          // 下の生地
+  ctx.fillStyle = "#f7edd2";
+  ctx.fillRect(l, t + h * 0.44, w, h * 0.18);          // クリーム
+  ctx.fillStyle = "#7a5230";
+  ctx.fillRect(l, t + h * 0.30, w, h * 0.14);          // 中の生地
+  ctx.fillStyle = "#f7edd2";
+  ctx.fillRect(l, t + h * 0.16, w, h * 0.14);          // 上のクリーム
+  // ココアパウダーの天面
+  ctx.fillStyle = "#5a3a22";
+  ctx.fillRect(l, t, w, h * 0.16);
+  // ココアの粉っぽさ（点々）
+  ctx.fillStyle = "#3f2817";
+  for (let i = 0; i < 5; i++) {
+    ctx.fillRect(l + (i * 0.19 + 0.06) * w, t + h * 0.04, w * 0.05, h * 0.05);
+  }
+  // ふち
+  ctx.strokeStyle = "rgba(0,0,0,0.35)";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(l, t, w, h);
+  ctx.restore();
+}
+
 function drawEmoji(emoji, x, y, size, flip) {
   ctx.save();
   ctx.translate(x, y);
@@ -343,7 +401,8 @@ function drawHUD() {
   ctx.font = "bold 24px sans-serif";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
-  ctx.fillText("🍰 " + score, 20, 28);
+  drawTiramisu(32, 27, 24);
+  ctx.fillText(String(score), 52, 28);
   ctx.textAlign = "center";
   ctx.fillStyle = "#ffd97a";
   ctx.font = "bold 18px sans-serif";
@@ -367,21 +426,35 @@ function drawCenterPanel() {
 }
 
 function draw() {
+  // 画面揺れは陽介の指の審査でオフに決定（2026-08-18）。SHAKE_PXを0以外にすると復活する
+  ctx.save();
+  if (shakeTime > 0 && state === "play" && SHAKE_PX > 0) {
+    const p = shakeTime / SHAKE_DUR; // 1→0
+    ctx.translate(0, -Math.sin(p * Math.PI) * SHAKE_PX);
+  }
+
   drawBackground();
 
   if (state === "play" || state === "over") {
     for (const it of items) {
-      if (it.type === "tiramisu") drawEmoji("🍰", it.x, it.y, 38);
+      if (it.type === "tiramisu") drawTiramisu(it.x, it.y, 36);
       else if (it.type === "bigcrow") drawEmoji("🐦‍⬛", it.x, it.y, 110);
       else drawEmoji("🐦‍⬛", it.x, it.y, 40);
     }
-    drawEmoji("🐈‍⬛", player.x, player.y, 56);
+    // 忍者猫: 押している間は少し沈んで、進行方向に傾く
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    ctx.rotate(lean);
+    ctx.translate(0, squash * 3);
+    ctx.scale(1 + squash * 0.06, 1 - squash * 0.08);
+    drawEmoji("🐈‍⬛", 0, 0, 56);
     ctx.strokeStyle = "#d43f3f";
     ctx.lineWidth = 4;
     ctx.beginPath();
-    ctx.moveTo(player.x - 20, player.y - 18);
-    ctx.lineTo(player.x + 20, player.y - 18);
+    ctx.moveTo(-20, -18);
+    ctx.lineTo(20, -18);
     ctx.stroke();
+    ctx.restore();
     drawHUD();
   }
 
@@ -410,7 +483,7 @@ function draw() {
     drawEmoji("🐈‍⬛", W / 2, H / 2 + 170, 64);
     ctx.font = "18px sans-serif";
     ctx.fillStyle = "#ccd6ff";
-    ctx.fillText("🍰をあつめて 🐦‍⬛カラスをよけろ！", W / 2, H / 2 + 240);
+    ctx.fillText("ティラミスをあつめて 🐦‍⬛カラスをよけろ！", W / 2, H / 2 + 240);
     ctx.fillText("カラス5回 か ボスガラス1回で ゲームオーバー", W / 2, H / 2 + 268);
     ctx.fillText("← →キー か 画面の左右タッチでうごく", W / 2, H / 2 + 296);
   }
@@ -445,6 +518,8 @@ function draw() {
     ctx.fillStyle = "#ffd97a";
     ctx.fillText("タップ か スペースキーで もういちど", W / 2, H / 2 + 110);
   }
+
+  ctx.restore(); // 画面揺れのぶんを戻す
 }
 
 function loop(ts) {
@@ -466,7 +541,8 @@ window._debug = {
   setLives: (n) => { lives = n; },
   finish: (r) => finishGame(r),
   difficulty: () => difficulty(),
-  state: () => ({ state, score, best, lives, overReason, timeLeft, bigCrowTimes: bigCrowTimes.slice() }),
+  press: (d) => { keys.left = d < 0; keys.right = d > 0; },
+  state: () => ({ state, score, best, lives, overReason, timeLeft, shakeTime, squash: +squash.toFixed(2), lean: +lean.toFixed(2), bigCrowTimes: bigCrowTimes.slice() }),
 };
 </script>
 </body>
