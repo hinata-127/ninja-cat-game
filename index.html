@@ -83,6 +83,11 @@ let revealT = 0;       // タメの経過秒数
 let revealDur = 0.8;   // タメの長さ（2回目からは半分）
 let revealCount = 0;   // 今セッションで結果発表を見た回数
 let goldFlash = 0;     // 新記録のときの金色の光（残り秒数）
+
+// ゼロ秒リトライ（第7話）
+let lastScore = null;    // 直近に終わったプレイの点数
+let prevRunScore = null; // その1つ前のプレイの点数（画面で「前回」として出す）
+let overLock = 0;        // 負けた直後の誤タップで即再開しちゃわないためのガード
 let squash = 0;        // 押した瞬間の沈み込み 0〜1
 let lean = 0;          // 進行方向への傾き
 
@@ -163,7 +168,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "ArrowLeft") keys.left = true;
   if (e.key === "ArrowRight") keys.right = true;
   if (state === "reveal" && (e.key === " " || e.key === "Enter")) { doReveal(); return; }
-  if ((state === "title" || state === "over") && (e.key === " " || e.key === "Enter")) startGame();
+  if ((state === "title" || (state === "over" && overLock <= 0)) && (e.key === " " || e.key === "Enter")) startGame();
 });
 document.addEventListener("keyup", (e) => {
   if (e.key === "ArrowLeft") keys.left = false;
@@ -180,7 +185,11 @@ canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
   unlockAudio();
   if (state === "reveal") { doReveal(); return; }
-  if (state !== "play") { startGame(); return; }
+  if (state !== "play") {
+    if (state === "over" && overLock > 0) return;
+    startGame();
+    return;
+  }
   touchDir = touchPos(e) < W / 2 ? -1 : 1;
   soundStep();
 }, { passive: false });
@@ -192,6 +201,7 @@ canvas.addEventListener("touchend", (e) => { e.preventDefault(); touchDir = 0; }
 canvas.addEventListener("mousedown", () => {
   unlockAudio();
   if (state === "reveal") { doReveal(); return; }
+  if (state === "over" && overLock > 0) return;
   if (state !== "play") startGame();
 });
 
@@ -204,12 +214,17 @@ function startGame() {
   overReason = "time";
   items = [];
   spawnTimer = 0;
+  hitFlash = 0;
+  goldFlash = 0;
+  shakeTime = 0;
   player.x = W / 2;
   bigCrowTimes = [25, 12]; // 残り25秒と12秒に大きなカラスが来る（40秒プレイ用）
 }
 
 function finishGame(reason) {
   overReason = reason || "time";
+  prevRunScore = lastScore; // 1つ前のプレイの点数を「前回」として並べる
+  lastScore = score;
   if (score > best) {
     best = score;
     isNewRecord = true;
@@ -218,6 +233,7 @@ function finishGame(reason) {
   if (overReason === "crow") {
     // 失敗は待たせない。即ゲームオーバー（でも新記録ならお祝いはする）
     state = "over";
+    overLock = 0.35; // 死んだ瞬間の連打で気づかないうちに再開しちゃわないように
     if (isNewRecord) {
       goldFlash = 1.0;
       soundJackpot();
@@ -237,6 +253,7 @@ function finishGame(reason) {
 function doReveal() {
   if (state !== "reveal") return;
   state = "over";
+  overLock = 0.35;
   if (isNewRecord) {
     goldFlash = 1.0;
     soundJackpot();
@@ -282,6 +299,7 @@ function spawnBigCrow() {
 
 function update(dt) {
   if (goldFlash > 0) goldFlash -= dt;
+  if (overLock > 0) overLock -= dt;
   if (state === "reveal") {
     revealT += dt;
     if (revealT >= revealDur) doReveal();
@@ -333,10 +351,10 @@ function update(dt) {
         soundCollect();
         shakeTime = SHAKE_DUR; // 成功の瞬間だけ、小さく揺れる
       } else if (it.type === "bigcrow") {
-        // ボスガラスは一発アウト
+        // ボスガラスは一発アウト。とどめのカラスは消さずに光らせて残す（負けた原因の証拠品）
         hitFlash = 0.8;
         soundBigHit();
-        items.splice(i, 1);
+        it.killer = true;
         finishGame("crow");
         return;
       } else {
@@ -345,7 +363,7 @@ function update(dt) {
         hitFlash = 0.35;
         soundHit();
         if (lives <= 0) {
-          items.splice(i, 1);
+          it.killer = true;
           finishGame("crow");
           return;
         }
@@ -567,29 +585,45 @@ function draw() {
 
   if (state === "over") {
     drawCenterPanel();
+
+    // 負けた原因の表示: とどめを刺したカラスがその場で光る（盤面は消さない）
+    const killer = items.find((k) => k.killer);
+    if (killer) {
+      const pulse = 0.5 + Math.abs(Math.sin(Date.now() / 220)) * 0.5;
+      const kr = killer.type === "bigcrow" ? 80 : 42;
+      const kg = ctx.createRadialGradient(killer.x, killer.y, 4, killer.x, killer.y, kr);
+      kg.addColorStop(0, "rgba(255,90,70," + 0.55 * pulse + ")");
+      kg.addColorStop(1, "rgba(255,90,70,0)");
+      ctx.fillStyle = kg;
+      ctx.beginPath();
+      ctx.arc(killer.x, killer.y, kr, 0, Math.PI * 2);
+      ctx.fill();
+      drawEmoji("🐦‍⬛", killer.x, killer.y, killer.type === "bigcrow" ? 110 : 40);
+    }
+
     ctx.fillStyle = "#fff";
     ctx.textAlign = "center";
     ctx.font = "bold 34px sans-serif";
     if (overReason === "crow") {
-      drawEmoji("🐦‍⬛", W / 2, H / 2 - 160, 48);
-      ctx.font = "bold 34px sans-serif";
-      ctx.fillStyle = "#fff";
-      ctx.textAlign = "center";
       ctx.fillText("カラスにやられた…！", W / 2, H / 2 - 100);
     } else {
       ctx.fillText("おわり！", W / 2, H / 2 - 100);
     }
     ctx.font = "bold 44px sans-serif";
     ctx.fillStyle = "#ffe9a8";
-    ctx.fillText("今回の点数 " + score + " 個", W / 2, H / 2 - 30);
+    ctx.fillText("今回の点数 " + score + " 個", W / 2, H / 2 - 36);
+    // 前回の記録をすぐ下に並べる（一番身近なライバルは1分前の自分）
+    ctx.font = "20px sans-serif";
+    ctx.fillStyle = "#ccd6ff";
+    ctx.fillText(prevRunScore === null ? "前回 まだなし" : "前回 " + prevRunScore + " 個", W / 2, H / 2 + 0);
     ctx.font = "bold 26px sans-serif";
     if (isNewRecord) {
       const blink = Math.abs(Math.sin(Date.now() / 250));
       ctx.fillStyle = "rgba(255,217,122," + (0.5 + blink * 0.5) + ")";
-      ctx.fillText("✨ 新記録！ ✨", W / 2, H / 2 + 24);
+      ctx.fillText("✨ 新記録！ ✨", W / 2, H / 2 + 44);
     } else {
       ctx.fillStyle = "#ffd97a";
-      ctx.fillText("これまでの最高記録 " + best + " 個", W / 2, H / 2 + 24);
+      ctx.fillText("これまでの最高記録 " + best + " 個", W / 2, H / 2 + 44);
     }
     ctx.font = "20px sans-serif";
     ctx.fillStyle = "#ffd97a";
@@ -626,7 +660,7 @@ window._debug = {
   difficulty: () => difficulty(),
   press: (d) => { keys.left = d < 0; keys.right = d > 0; },
   reveal: () => doReveal(),
-  state: () => ({ state, score, best, lives, overReason, timeLeft, revealT: +revealT.toFixed(2), revealDur, revealCount, goldFlash: +goldFlash.toFixed(2), squash: +squash.toFixed(2), lean: +lean.toFixed(2), bigCrowTimes: bigCrowTimes.slice() }),
+  state: () => ({ state, score, best, lives, overReason, timeLeft, lastScore, prevRunScore, overLock: +overLock.toFixed(2), killer: items.some(k => k.killer), revealT: +revealT.toFixed(2), revealDur, revealCount, goldFlash: +goldFlash.toFixed(2), squash: +squash.toFixed(2), lean: +lean.toFixed(2), bigCrowTimes: bigCrowTimes.slice() }),
 };
 </script>
 </body>
