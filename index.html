@@ -88,6 +88,47 @@ let goldFlash = 0;     // 新記録のときの金色の光（残り秒数）
 let lastScore = null;    // 直近に終わったプレイの点数
 let prevRunScore = null; // その1つ前のプレイの点数（画面で「前回」として出す）
 let overLock = 0;        // 負けた直後の誤タップで即再開しちゃわないためのガード
+
+// 小さな謎（第8話）: タイトルの3つの提灯を、ティラミスの層の上→下の順（ココア→クリーム→コーヒー生地）で灯すと解ける
+const LANTERN_COLORS = { cocoa: "#5a3a22", cream: "#f7edd2", sponge: "#7a5230" };
+const LANTERN_ANSWER = ["cocoa", "cream", "sponge"]; // 手掛かりは画面のティラミスそのもの
+let lanterns = [];          // {x, y, color, lit}
+let lanternProgress = 0;    // いま何個目まで正しく灯せているか
+let lanternSolved = false;  // このタイトル画面で解けたか
+let pendingBonusHearts = false; // 次の1プレイをハート6個にする
+let startLives = 5;         // 今プレイの開始時ハート数（描画用）
+
+function setupLanterns() {
+  const colors = Object.keys(LANTERN_COLORS);
+  // 毎回シャッフル（丸暗記では解けない。色を見て気づく）
+  for (let i = colors.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [colors[i], colors[j]] = [colors[j], colors[i]];
+  }
+  lanterns = colors.map((c, i) => ({ x: 70 + i * 85, y: 118, color: c, lit: false }));
+  lanternProgress = 0;
+  lanternSolved = false;
+}
+setupLanterns();
+
+function tapLantern(l) {
+  if (lanternSolved || l.lit) return;
+  if (l.color === LANTERN_ANSWER[lanternProgress]) {
+    l.lit = true;
+    lanternProgress++;
+    beep(660 + lanternProgress * 110, 0.1, "triangle", 0.15);
+    if (lanternProgress === LANTERN_ANSWER.length) {
+      lanternSolved = true;
+      pendingBonusHearts = true;
+      soundJackpot();
+    }
+  } else {
+    // 間違い: 罰なし。静かに全部消えて、何度でも試せる
+    lanterns.forEach((k) => (k.lit = false));
+    lanternProgress = 0;
+    beep(150, 0.12, "sine", 0.08);
+  }
+}
 let squash = 0;        // 押した瞬間の沈み込み 0〜1
 let lean = 0;          // 進行方向への傾き
 
@@ -181,13 +222,42 @@ function touchPos(e) {
   const t = e.touches ? e.touches[0] : e;
   return (t.clientX - rect.left) / rect.width * W;
 }
+function canvasPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return {
+    x: (t.clientX - rect.left) / rect.width * W,
+    y: (t.clientY - rect.top) / rect.height * H,
+  };
+}
+
+function goTitle() {
+  state = "title";
+  setupLanterns(); // 提灯はタイトルに戻るたび並び替え
+}
+
+// タイトル画面のタップ振り分け: 提灯に当たれば謎、それ以外はゲーム開始
+function handleTitleTap(e) {
+  const p = canvasPos(e);
+  const hit = lanterns.find((l) => Math.abs(p.x - l.x) < 34 && Math.abs(p.y - l.y) < 46);
+  if (hit) { tapLantern(hit); return; }
+  startGame();
+}
+
+// ゲームオーバー画面のタップ振り分け: 左下の「さとにもどる」だけ別扱い
+function handleOverTap(e) {
+  const p = canvasPos(e);
+  if (p.x < 140 && p.y > H - 70) { goTitle(); return; }
+  startGame();
+}
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
   unlockAudio();
   if (state === "reveal") { doReveal(); return; }
-  if (state !== "play") {
-    if (state === "over" && overLock > 0) return;
-    startGame();
+  if (state === "title") { handleTitleTap(e); return; }
+  if (state === "over") {
+    if (overLock > 0) return;
+    handleOverTap(e);
     return;
   }
   touchDir = touchPos(e) < W / 2 ? -1 : 1;
@@ -198,11 +268,14 @@ canvas.addEventListener("touchmove", (e) => {
   if (state === "play") touchDir = touchPos(e) < W / 2 ? -1 : 1;
 }, { passive: false });
 canvas.addEventListener("touchend", (e) => { e.preventDefault(); touchDir = 0; }, { passive: false });
-canvas.addEventListener("mousedown", () => {
+canvas.addEventListener("mousedown", (e) => {
   unlockAudio();
   if (state === "reveal") { doReveal(); return; }
-  if (state === "over" && overLock > 0) return;
-  if (state !== "play") startGame();
+  if (state === "title") { handleTitleTap(e); return; }
+  if (state === "over") {
+    if (overLock > 0) return;
+    handleOverTap(e);
+  }
 });
 
 function startGame() {
@@ -210,7 +283,9 @@ function startGame() {
   score = 0;
   isNewRecord = false;
   timeLeft = GAME_TIME;
-  lives = MAX_LIVES;
+  startLives = MAX_LIVES + (pendingBonusHearts ? 1 : 0); // 提灯の謎を解いていたらハート6個
+  pendingBonusHearts = false;
+  lives = startLives;
   overReason = "time";
   items = [];
   spawnTimer = 0;
@@ -454,6 +529,53 @@ function drawTiramisu(x, y, size) {
   ctx.restore();
 }
 
+function drawLantern(l) {
+  ctx.save();
+  ctx.translate(l.x, l.y);
+  // 天井から下がる紐
+  ctx.strokeStyle = "rgba(255,255,255,0.3)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, -l.y);
+  ctx.lineTo(0, -30);
+  ctx.stroke();
+  // 灯った提灯のまわりの光
+  if (l.lit) {
+    const color = lanternSolved ? "255,215,120" : "255,240,200";
+    const g = ctx.createRadialGradient(0, 0, 5, 0, 0, 55);
+    g.addColorStop(0, "rgba(" + color + ",0.5)");
+    g.addColorStop(1, "rgba(" + color + ",0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, 55, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // 上下のふた
+  ctx.fillStyle = "#2b2418";
+  ctx.fillRect(-10, -32, 20, 6);
+  ctx.fillRect(-10, 26, 20, 6);
+  // 火袋（色が手掛かり）
+  ctx.fillStyle = LANTERN_COLORS[l.color];
+  ctx.beginPath();
+  ctx.ellipse(0, -2, 22, 28, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // 骨の線
+  ctx.strokeStyle = "rgba(0,0,0,0.25)";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(-21, -8); ctx.lineTo(21, -8);
+  ctx.moveTo(-21, 6); ctx.lineTo(21, 6);
+  ctx.stroke();
+  // 消えている間は少し暗く
+  if (!l.lit) {
+    ctx.fillStyle = "rgba(10,12,30,0.45)";
+    ctx.beginPath();
+    ctx.ellipse(0, -2, 22, 28, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function drawEmoji(emoji, x, y, size, flip) {
   ctx.save();
   ctx.translate(x, y);
@@ -483,11 +605,11 @@ function drawHUD() {
   ctx.textAlign = "right";
   ctx.fillText("⏱ " + Math.ceil(timeLeft), W - 20, 28);
 
-  // 残機ハート（カラスに当たれる残り回数）
+  // 残機ハート（カラスに当たれる残り回数。提灯の謎ボーナス中は6個）
   ctx.font = "18px serif";
   ctx.textAlign = "left";
   let hearts = "";
-  for (let i = 0; i < MAX_LIVES; i++) hearts += i < lives ? "❤️" : "🖤";
+  for (let i = 0; i < startLives; i++) hearts += i < lives ? "❤️" : "🖤";
   ctx.fillText(hearts, 16, 74);
 }
 
@@ -538,6 +660,14 @@ function draw() {
 
   if (state === "title") {
     drawCenterPanel();
+    // 小さな謎: 3つの提灯（説明はしない。色に気づいた人だけのお楽しみ）
+    lanterns.forEach(drawLantern);
+    if (lanternSolved) {
+      ctx.textAlign = "center";
+      ctx.font = "bold 17px sans-serif";
+      ctx.fillStyle = "#ffd97a";
+      ctx.fillText("あかりが そろった！ 次のプレイは ❤️ 6つ", W / 2, 195);
+    }
     ctx.fillStyle = "#fff";
     ctx.textAlign = "center";
     ctx.font = "bold 34px sans-serif";
@@ -629,6 +759,13 @@ function draw() {
     ctx.fillStyle = "#ffd97a";
     ctx.fillText("タップ か スペースキーで もういちど", W / 2, H / 2 + 110);
 
+    // タイトルへ戻る導線（小さめに）
+    ctx.font = "16px sans-serif";
+    ctx.fillStyle = "rgba(204,214,255,0.7)";
+    ctx.textAlign = "left";
+    ctx.fillText("← さとにもどる", 20, H - 30);
+    ctx.textAlign = "center";
+
     // 新記録の開示: 金色の光がふわっと出て消える（画面は動かさない）
     if (goldFlash > 0) {
       ctx.fillStyle = "rgba(255,205,90," + goldFlash * 0.45 + ")";
@@ -660,6 +797,10 @@ window._debug = {
   difficulty: () => difficulty(),
   press: (d) => { keys.left = d < 0; keys.right = d > 0; },
   reveal: () => doReveal(),
+  goTitle: () => goTitle(),
+  lanterns: () => lanterns.map(l => ({ color: l.color, lit: l.lit })),
+  tapLantern: (i) => tapLantern(lanterns[i]),
+  puzzle: () => ({ lanternProgress, lanternSolved, pendingBonusHearts, startLives }),
   state: () => ({ state, score, best, lives, overReason, timeLeft, lastScore, prevRunScore, overLock: +overLock.toFixed(2), killer: items.some(k => k.killer), revealT: +revealT.toFixed(2), revealDur, revealCount, goldFlash: +goldFlash.toFixed(2), squash: +squash.toFixed(2), lean: +lean.toFixed(2), bigCrowTimes: bigCrowTimes.slice() }),
 };
 </script>
