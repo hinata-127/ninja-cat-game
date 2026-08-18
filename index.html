@@ -216,9 +216,14 @@ function finishGame(reason) {
     localStorage.setItem(BEST_KEY, String(best));
   }
   if (overReason === "crow") {
-    // 失敗は待たせない。即ゲームオーバー
+    // 失敗は待たせない。即ゲームオーバー（でも新記録ならお祝いはする）
     state = "over";
-    soundGameOver();
+    if (isNewRecord) {
+      goldFlash = 1.0;
+      soundJackpot();
+    } else {
+      soundGameOver();
+    }
     return;
   }
   // 時間切れ→結果発表の前にタメを入れる（2回目からは半分、タップで飛ばせる）
@@ -233,7 +238,7 @@ function doReveal() {
   if (state !== "reveal") return;
   state = "over";
   if (isNewRecord) {
-    goldFlash = 0.6;
+    goldFlash = 1.0;
     soundJackpot();
   } else {
     soundFinish();
@@ -592,7 +597,7 @@ function draw() {
 
     // 新記録の開示: 金色の光がふわっと出て消える（画面は動かさない）
     if (goldFlash > 0) {
-      ctx.fillStyle = "rgba(255,205,90," + goldFlash * 0.35 + ")";
+      ctx.fillStyle = "rgba(255,205,90," + goldFlash * 0.45 + ")";
       ctx.fillRect(0, 0, W, H);
     }
   }
