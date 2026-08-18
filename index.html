@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>忍者猫とティラミス — 夜の忍者の里</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: #0b1026;
+    height: 100%;
+    overflow: hidden;
+    touch-action: none;
+    font-family: "Segoe UI", "Hiragino Sans", "Meiryo", sans-serif;
+  }
+  #wrap {
+    position: relative;
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    display: block;
+    max-width: 100vw;
+    max-height: 100vh;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+// ゲームのたね
+// ・集めるもの: ティラミス
+// ・よけるもの: カラス
+// ・場所: 夜の忍者の里
+// ・操作: 左右に動くだけ
+// ・終わり方: 60秒たったら、集めた数を表示して終わり
+//
+// パワーアップ版（第3話）
+// ・点数の常時表示と、最高記録の保存（ブラウザを閉じても残る）
+// ・効果音（素材なし、コードだけで鳴らす。最初の操作のあとから）
+// ・だんだんむずかしく（最初の10秒はやさしい。上限あり）
+// ・スマホの細い画面でも遊べる
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+const W = 480, H = 720;
+canvas.width = W;
+canvas.height = H;
+
+function fitCanvas() {
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width = W * scale + "px";
+  canvas.style.height = H * scale + "px";
+}
+window.addEventListener("resize", fitCanvas);
+fitCanvas();
+
+const GAME_TIME = 60;
+const BEST_KEY = "ninjacat_tiramisu_best";
+
+let state = "title";   // title / play / over
+let score = 0;
+let best = Number(localStorage.getItem(BEST_KEY) || 0);
+let isNewRecord = false;
+let timeLeft = GAME_TIME;
+let player = { x: W / 2, y: H - 90, w: 56, speed: 320 };
+let items = [];        // 落ちてくるもの
+let spawnTimer = 0;
+let hitFlash = 0;
+let lastTime = 0;
+let bigCrowTimes = []; // 大きなカラスが出る時刻（残り秒数）
+
+// ---- 効果音（コードだけで鳴らす） ----
+let audioCtx = null;
+function unlockAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+  if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+}
+function beep(freq, dur, type, vol, when, slideTo) {
+  if (!audioCtx || audioCtx.state !== "running") return;
+  const t0 = audioCtx.currentTime + (when || 0);
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type || "triangle";
+  osc.frequency.setValueAtTime(freq, t0);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+  gain.gain.setValueAtTime(vol || 0.15, t0);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.02);
+}
+function soundCollect() {  // 集めた: かわいい2音
+  beep(880, 0.09, "triangle", 0.18);
+  beep(1318, 0.12, "triangle", 0.15, 0.07);
+}
+function soundHit() {      // カラス: 下がる音
+  beep(220, 0.25, "sawtooth", 0.18, 0, 80);
+}
+function soundBigHit() {   // 大カラス: 低いドーン
+  beep(120, 0.5, "sawtooth", 0.25, 0, 40);
+  beep(60, 0.5, "square", 0.2, 0.05, 30);
+}
+function soundFinish() {   // 終了ファンファーレ
+  beep(660, 0.12, "triangle", 0.18);
+  beep(880, 0.12, "triangle", 0.18, 0.12);
+  beep(1108, 0.3, "triangle", 0.18, 0.24);
+}
+
+// ---- 入力 ----
+const keys = { left: false, right: false };
+let touchDir = 0;
+
+document.addEventListener("keydown", (e) => {
+  unlockAudio();
+  if (e.key === "ArrowLeft") keys.left = true;
+  if (e.key === "ArrowRight") keys.right = true;
+  if ((state === "title" || state === "over") && (e.key === " " || e.key === "Enter")) startGame();
+});
+document.addEventListener("keyup", (e) => {
+  if (e.key === "ArrowLeft") keys.left = false;
+  if (e.key === "ArrowRight") keys.right = false;
+});
+
+// タッチ: 画面の左半分＝左へ、右半分＝右へ（画面ぜんぶがボタン）
+function touchPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return (t.clientX - rect.left) / rect.width * W;
+}
+canvas.addEventListener("touchstart", (e) => {
+  e.preventDefault();
+  unlockAudio();
+  if (state !== "play") { startGame(); return; }
+  touchDir = touchPos(e) < W / 2 ? -1 : 1;
+}, { passive: false });
+canvas.addEventListener("touchmove", (e) => {
+  e.preventDefault();
+  if (state === "play") touchDir = touchPos(e) < W / 2 ? -1 : 1;
+}, { passive: false });
+canvas.addEventListener("touchend", (e) => { e.preventDefault(); touchDir = 0; }, { passive: false });
+canvas.addEventListener("mousedown", () => { unlockAudio(); if (state !== "play") startGame(); });
+
+function startGame() {
+  state = "play";
+  score = 0;
+  isNewRecord = false;
+  timeLeft = GAME_TIME;
+  items = [];
+  spawnTimer = 0;
+  player.x = W / 2;
+  bigCrowTimes = [40, 20]; // 残り40秒と20秒に大きなカラスが来る
+}
+
+function finishGame() {
+  state = "over";
+  if (score > best) {
+    best = score;
+    isNewRecord = true;
+    localStorage.setItem(BEST_KEY, String(best));
+  }
+  soundFinish();
+}
+
+// ---- むずかしさ（0=やさしい 〜 1=最大） ----
+function difficulty() {
+  const elapsed = GAME_TIME - timeLeft;
+  if (elapsed < 10) return 0;              // はじめの10秒はやさしいまま
+  return Math.min(1, (elapsed - 10) / 35); // そのあとゆっくり上がって、上限で止まる
+}
+
+function spawnItem() {
+  const d = difficulty();
+  const crowRate = 0.18 + d * 0.14;        // カラスの割合: 18% → 32%
+  const isCrow = Math.random() < crowRate;
+  items.push({
+    type: isCrow ? "crow" : "tiramisu",
+    x: 30 + Math.random() * (W - 60),
+    y: -40,
+    vy: (120 + Math.random() * 100) * (1 + d * 0.7),  // 落ちる速さも少しずつ上がる
+    sway: (Math.random() - 0.5) * (60 + d * 60),
+    t: Math.random() * Math.PI * 2,
+    r: 42,
+  });
+}
+
+function spawnBigCrow() {
+  // 途中で来る大きなカラス。当たるとティラミス3個減る
+  items.push({
+    type: "bigcrow",
+    x: 60 + Math.random() * (W - 120),
+    y: -80,
+    vy: 100,
+    sway: 90,
+    t: Math.random() * Math.PI * 2,
+    r: 70,
+  });
+}
+
+function update(dt) {
+  if (state !== "play") return;
+
+  timeLeft -= dt;
+  if (timeLeft <= 0) { timeLeft = 0; finishGame(); return; }
+
+  // 決めた時刻になったら、大きなカラスを落とす
+  if (bigCrowTimes.length > 0 && timeLeft <= bigCrowTimes[0]) {
+    bigCrowTimes.shift();
+    spawnBigCrow();
+  }
+
+  // プレイヤー移動
+  let dir = 0;
+  if (keys.left) dir -= 1;
+  if (keys.right) dir += 1;
+  if (touchDir !== 0) dir = touchDir;
+  player.x += dir * player.speed * dt;
+  player.x = Math.max(30, Math.min(W - 30, player.x));
+
+  // 出現（だんだん間隔が短くなる。上限あり）
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnItem();
+    spawnTimer = 0.75 - difficulty() * 0.33;  // 0.75秒 → 0.42秒
+  }
+
+  // 落下と当たり判定
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    it.t += dt * 2;
+    it.y += it.vy * dt;
+    it.x += Math.sin(it.t) * it.sway * dt;
+
+    const dx = it.x - player.x;
+    const dy = it.y - player.y;
+    if (Math.abs(dx) < it.r && Math.abs(dy) < it.r) {
+      if (it.type === "tiramisu") {
+        score++;
+        soundCollect();
+      } else if (it.type === "bigcrow") {
+        score = Math.max(0, score - 3);
+        hitFlash = 0.6;
+        soundBigHit();
+      } else {
+        score = Math.max(0, score - 1);
+        hitFlash = 0.35;
+        soundHit();
+      }
+      items.splice(i, 1);
+      continue;
+    }
+    if (it.y > H + 90) items.splice(i, 1);
+  }
+
+  if (hitFlash > 0) hitFlash -= dt;
+}
+
+// ---- 描画 ----
+
+function drawBackground() {
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, "#0b1026");
+  sky.addColorStop(0.7, "#1a2340");
+  sky.addColorStop(1, "#2a3050");
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = "rgba(255,255,255,0.8)";
+  for (let i = 0; i < 40; i++) {
+    const sx = (i * 137.5) % W;
+    const sy = (i * 89.3) % (H * 0.6);
+    const tw = 0.5 + Math.abs(Math.sin(Date.now() / 700 + i)) * 1.3;
+    ctx.fillRect(sx, sy, tw, tw);
+  }
+
+  ctx.fillStyle = "#f5e9c8";
+  ctx.beginPath();
+  ctx.arc(W - 90, 100, 42, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#e8d9ae";
+  ctx.beginPath();
+  ctx.arc(W - 100, 92, 8, 0, Math.PI * 2);
+  ctx.arc(W - 78, 112, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#0d1220";
+  for (let i = 0; i < 5; i++) {
+    const bx = i * 110 - 30;
+    const bh = 90 + (i % 3) * 35;
+    ctx.fillRect(bx, H - bh, 90, bh);
+    ctx.beginPath();
+    ctx.moveTo(bx - 14, H - bh);
+    ctx.quadraticCurveTo(bx + 45, H - bh - 42, bx + 104, H - bh);
+    ctx.fill();
+    ctx.fillStyle = "#f7c873";
+    ctx.fillRect(bx + 34, H - bh + 26, 14, 14);
+    ctx.fillStyle = "#0d1220";
+  }
+
+  ctx.fillStyle = "#161c30";
+  ctx.fillRect(0, H - 40, W, 40);
+}
+
+function drawEmoji(emoji, x, y, size, flip) {
+  ctx.save();
+  ctx.translate(x, y);
+  if (flip) ctx.scale(-1, 1);
+  ctx.font = size + "px serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(emoji, 0, 0);
+  ctx.restore();
+}
+
+function drawHUD() {
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.fillRect(0, 0, W, 54);
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 24px sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText("🍰 " + score, 20, 28);
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#ffd97a";
+  ctx.font = "bold 18px sans-serif";
+  ctx.fillText("最高 " + best, W / 2, 28);
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 24px sans-serif";
+  ctx.textAlign = "right";
+  ctx.fillText("⏱ " + Math.ceil(timeLeft), W - 20, 28);
+}
+
+function drawCenterPanel() {
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(0, 0, W, H);
+}
+
+function draw() {
+  drawBackground();
+
+  if (state === "play" || state === "over") {
+    for (const it of items) {
+      if (it.type === "tiramisu") drawEmoji("🍰", it.x, it.y, 38);
+      else if (it.type === "bigcrow") drawEmoji("🐦‍⬛", it.x, it.y, 110);
+      else drawEmoji("🐦‍⬛", it.x, it.y, 40);
+    }
+    drawEmoji("🐈‍⬛", player.x, player.y, 56);
+    ctx.strokeStyle = "#d43f3f";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(player.x - 20, player.y - 18);
+    ctx.lineTo(player.x + 20, player.y - 18);
+    ctx.stroke();
+    drawHUD();
+  }
+
+  if (hitFlash > 0) {
+    ctx.fillStyle = "rgba(255,60,60," + hitFlash * 0.5 + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  ctx.textBaseline = "alphabetic";
+
+  if (state === "title") {
+    drawCenterPanel();
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.font = "bold 34px sans-serif";
+    ctx.fillText("忍者猫と", W / 2, H / 2 - 60);
+    ctx.fillText("ティラミス", W / 2, H / 2 - 8);
+    if (best > 0) {
+      ctx.font = "bold 22px sans-serif";
+      ctx.fillStyle = "#ffd97a";
+      ctx.fillText("これまでの最高記録: " + best + " 個", W / 2, H / 2 + 46);
+    }
+    ctx.font = "20px sans-serif";
+    ctx.fillStyle = "#ffd97a";
+    ctx.fillText("タップ か スペースキーで はじめる", W / 2, H / 2 + 110);
+    drawEmoji("🐈‍⬛", W / 2, H / 2 + 170, 64);
+    ctx.font = "18px sans-serif";
+    ctx.fillStyle = "#ccd6ff";
+    ctx.fillText("🍰をあつめて 🐦‍⬛カラスをよけろ！", W / 2, H / 2 + 240);
+    ctx.fillText("← →キー か 画面の左右タッチでうごく", W / 2, H / 2 + 270);
+  }
+
+  if (state === "over") {
+    drawCenterPanel();
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.font = "bold 34px sans-serif";
+    ctx.fillText("おわり！", W / 2, H / 2 - 100);
+    ctx.font = "bold 44px sans-serif";
+    ctx.fillStyle = "#ffe9a8";
+    ctx.fillText("今回の点数 " + score + " 個", W / 2, H / 2 - 30);
+    ctx.font = "bold 26px sans-serif";
+    if (isNewRecord) {
+      const blink = Math.abs(Math.sin(Date.now() / 250));
+      ctx.fillStyle = "rgba(255,217,122," + (0.5 + blink * 0.5) + ")";
+      ctx.fillText("✨ 新記録！ ✨", W / 2, H / 2 + 24);
+    } else {
+      ctx.fillStyle = "#ffd97a";
+      ctx.fillText("これまでの最高記録 " + best + " 個", W / 2, H / 2 + 24);
+    }
+    ctx.font = "20px sans-serif";
+    ctx.fillStyle = "#ffd97a";
+    ctx.fillText("タップ か スペースキーで もういちど", W / 2, H / 2 + 110);
+  }
+}
+
+function loop(ts) {
+  const dt = Math.min((ts - lastTime) / 1000, 0.05);
+  lastTime = ts;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// 動作確認用（ゲームには影響しない）
+window._debug = {
+  start: () => startGame(),
+  spawnBigCrow: () => spawnBigCrow(),
+  items: () => items,
+  setTime: (t) => { timeLeft = t; },
+  setScore: (s) => { score = s; },
+  finish: () => finishGame(),
+  difficulty: () => difficulty(),
+  state: () => ({ state, score, best, timeLeft, bigCrowTimes: bigCrowTimes.slice() }),
+};
+</script>
+</body>
+</html>
